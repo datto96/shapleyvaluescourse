@@ -1,0 +1,209 @@
+---
+title: "EEA 2021 - TP 2 - Shapley Values: Teoría de Juegos aplicada a features"
+output: html_notebook
+---
+
+```{r include = FALSE}
+#Carga de Librerias
+library(tidymodels)
+library(corrr)
+library(knitr)
+library(kableExtra)
+library(GGally)
+library(ggplot2)
+library(ggmosaic)
+library(gridExtra)
+library(robustbase)
+library(relaimpo)
+library(MASS)
+library(tidyverse)
+library(car)
+```
+
+# Shapley Value Regression
+
+## 1) Análisis exploratorio
+
+Para el ejemplo, se utilizará un dataset que posee información obtenida a partir de mediciones a personas. Se utilizará modelos de regresión lineal para encontrar relaciones entre las variables independientes (actividad física, porcentaje de grasa corporal, peso) y la variable dependiente (densidad mineral del hueso del cuello femoral)
+
+```{r message=FALSE}
+mediciones <- read_csv("./MulticollinearityExample.csv")
+mediciones %>%
+  glimpse()
+```
+
+Se trata de un dataframe con 92 observaciones donde cada una se corresponde a los resultados de medir a una persona. Para cada observación hay 7 columnas de datos, donde todas son numéricas
+
+A efectos de la demostración, chequearemos los datos y la relación entre las variables:
+
+
+```{r message=FALSE}
+  mediciones %>% dplyr::select('Femoral Neck', '%Fat', 'Weight kg', 'Activity',) %>%
+  ggpairs() + 
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=45, vjust=0.5), legend.position = "bottom")
+```
+
+Comparo los resultados de la correlación de Pearson con la de Spearman (robusta a outliers) para ver si hay diferencias. 
+
+Correlación de Pearson:
+
+```{r}
+mediciones %>% dplyr::select('Femoral Neck', '%Fat', 'Weight kg', 'Activity',) %>%
+ correlate() %>% # convierte la matriz de corr en dataframe
+  shave() %>% # solo muestra información debajo de la diagonal principal
+  fashion() # acomoda los datos en forma tidy (por ej. redondeo de decimales)
+```
+
+Correlación de Spearman:
+
+```{r}
+mediciones %>% dplyr::select('Femoral Neck', '%Fat', 'Weight kg', 'Activity',) %>%
+ correlate(method = 'spearman') %>% # convierte la matriz de corr en dataframe
+  shave() %>% # solo muestra información debajo de la diagonal principal
+  fashion() # acomoda los datos en forma tidy (por ej. redondeo de decimales)
+```
+ 
+ Al parecer hay una relación lineal entre las variables: porcentaje de grasa corporal y peso en kilos.
+ 
+ Se realiza un gráfico especificamente para observar la relación de los datos
+ 
+```{r}
+ggplot(mediciones, aes(x = `%Fat`, y = `Weight kg`)) + 
+  geom_point()
+```
+
+Podemos concluir que existe una asociación linea positiva fuerte (correlación ~ 0.8) entre las variables porcentaje de grasa corporal y peso en kilos. Esto supone que si una variable aumenta, la otra aumenta.
+
+## 2) Modelo Inicial
+
+Se entrena un modelo lineal para predecir la variable "Densidad mineral osea del cuello femoral" o "Femoral Neck" en función de la actividad física, porcentaje de grasa corporal, peso:
+
+```{r}
+modelo_full <- lm(`Femoral Neck` ~ `%Fat` + `Weight kg` + `Activity`, data = mediciones)
+summary(modelo_full)
+```
+
+Los resultados muestran que las distintas variables regresoras resultan estadisticamente significativas en la predicción del Femoral Neck.
+
+A partir de la salida del modelo, se puede ver que el R2 o variabilidad explicada es de 52%.
+
+Dado que no podemos visualizar la importancia relativa de cada variables solo mirando el resumen de los modelos de regresión lineal, utilizaremos los Shapley Values para ver cual de todos resulta más importante en la predicción de la densidad del cuello femoral.
+
+Nos guardamos el R2 de este modelo:
+
+```{r}
+r2femoral_GrasaPesoActividad <- summary(lm(`Femoral Neck` ~ `%Fat` + `Weight kg` + `Activity`, data = mediciones))$r.squared
+```
+
+
+Volviendo al modelo y analizando el Variance Inflation Factor (VIF) vemos que los valores de %Fat y Weight KG no resultan lo suficientemente preocupantes.
+Recordemos que el VIF es el resultado de calcular 1/(1-R2). Donde R2 es el coeficiente de determinación obtenido de entrenar un modelo de regresión lineal de la regresora en cuestión en base al resto.
+Tambien tengamos que encuenta que un valor de 1 indica que no hay correlación entre las predictoras.
+Entre 1 y 5 la correlación entre ambas existe pero no es tan severa.
+Un valor mayor a 5 indica una correlación potencialmente severa. En caso de ocurrir, los coeficientes estimados y los p-valores de la regresión no resultan confiables.
+Por consiguiente, la varianza del estimador se encuentra inflada y hay mayor imprecisión en la estimación.
+
+```{r}
+vif(modelo_full)
+```
+```{r}
+vif_values <- vif(modelo_full)
+
+barplot(vif_values, main = "VIF Values", horiz = TRUE, col = "steelblue", axes=FALSE, xlim=c(0,6))
+axis(1,at=seq(0,6,1))
+
+abline(v = 2.5, lwd = 3, lty = 2)
+abline(v = 5, lwd = 3, lty = 2)
+```
+
+
+## 3) Modelos y Contribuciones Marginales
+
+Y nos guardamos el R2 de las regresiones lineales con las distintas combinaciones de jugadores o features:
+
+```{r}
+modelo_GrasaPeso <- lm(`Femoral Neck` ~ `%Fat` + `Weight kg`, data = mediciones)
+modelo_GrasaActividad <- lm(`Femoral Neck` ~ `%Fat` + `Activity`, data = mediciones)
+modelo_PesoActividad <- lm(`Femoral Neck` ~ `Weight kg` + `Activity`, data = mediciones)
+modelo_Grasa <- lm(`Femoral Neck` ~ `%Fat`, data = mediciones)
+modelo_Peso <- lm(`Femoral Neck` ~ `Weight kg`, data = mediciones)
+modelo_Actividad <- lm(`Femoral Neck` ~ `Activity`, data = mediciones)
+modelo_Nulo <- lm(`Femoral Neck` ~ 1, data = mediciones)
+
+r2femoral_GrasaPeso <- summary(modelo_GrasaPeso)$r.squared
+r2femoral_GrasaActividad <- summary(modelo_GrasaActividad)$r.squared
+r2femoral_PesoActividad <- summary(modelo_PesoActividad)$r.squared
+r2femoral_Grasa <- summary(modelo_Grasa)$r.squared
+r2femoral_Peso <- summary(modelo_Peso)$r.squared
+r2femoral_Actividad <- summary(modelo_Actividad)$r.squared
+r2femoral_Nulo <- summary(modelo_Nulo)$r.squared
+
+
+data.frame("Modelo"=c("Femoral_GrasaPesoActividad","Femoral_GrasaPeso","Femoral_GrasaActividad","Femoral_PesoActividad","Femoral_Grasa","Femoral_Peso","Femoral_Actividad","Femoral_Nulo"), "R2"=c(r2femoral_GrasaPesoActividad,r2femoral_GrasaPeso,r2femoral_GrasaActividad,r2femoral_PesoActividad,r2femoral_Grasa,r2femoral_Peso,r2femoral_Actividad,r2femoral_Nulo))
+```
+
+## 4) Calculo de Shapleys manual
+
+Pensando entonces en la formula que vimos antes, para calcular el Shapley Value de la variables "% Grasa corporal", debemos realizar la siguiente operación:
+
+```{r}
+ShapleyGrasaCorporal <- (r2femoral_Grasa + 
+                      ((r2femoral_GrasaPeso - r2femoral_Peso) + 
+                       (r2femoral_GrasaActividad - r2femoral_Actividad))/2 +
+                      (r2femoral_GrasaPesoActividad - r2femoral_PesoActividad))/3
+ShapleyGrasaCorporal
+```
+
+Perfecto! Ahora queda calcular el resto de los Shapley Values para Peso y Actividad Física de manera de poder compararlos.
+
+```{r}
+ShapleyPeso <- (r2femoral_Peso + 
+                      ((r2femoral_GrasaPeso - r2femoral_Grasa) + 
+                       (r2femoral_PesoActividad - r2femoral_Actividad))/2 +
+                      (r2femoral_GrasaPesoActividad - r2femoral_GrasaActividad))/3
+ShapleyPeso
+```
+
+```{r}
+ShapleyActividad <- (r2femoral_Actividad + 
+                      ((r2femoral_GrasaActividad - r2femoral_Grasa) + 
+                       (r2femoral_PesoActividad - r2femoral_Peso))/2 +
+                      (r2femoral_GrasaPesoActividad - r2femoral_GrasaPeso))/3
+ShapleyActividad
+```
+
+Sumamos los valores individuales para ver que cumplan que el total es el R2:
+
+```{r}
+print(paste0(c("Suma de Shapleys Individuales: ",ShapleyGrasaCorporal + ShapleyPeso + ShapleyActividad)))
+print(paste0(c("R2 del modelo full: ",r2femoral_GrasaPesoActividad)))
+```
+Excelente! Ya comprobamos que se cumple. Ahora vamos a que "porcentaje de la variabilidad explica cada feature":
+```{r}
+shapVals <- data.frame(ShapleyGrasaCorporal = ShapleyGrasaCorporal/(ShapleyGrasaCorporal+ShapleyPeso+ShapleyActividad), 
+                       ShapleyPeso = ShapleyPeso/(ShapleyGrasaCorporal+ShapleyPeso+ShapleyActividad),
+                       ShapleyActividad = ShapleyActividad/(ShapleyGrasaCorporal+ShapleyPeso+ShapleyActividad))
+shapVals
+```
+
+Podemos ver que la feature de Grasa Corporal explica el 23% de la variabilidad, el peso el 68% y la actividad el 0,8%. Al parecer el Peso de una persona es la variable mas importante al momento de poder predecir la  densidad mineral del hueso del cuello femoral. Por lo que si tuviesemos que elegir una entre Peso y Grasa Corporal para nuestro modelo, dado que se encuentran fuertemente correlacionadas, deberiamos elegir a la variables Peso.
+
+Adicionalmente, dado que como vimos el calculo es bastante manual, existe una libreria llamada "relaimp" que nos permite simplificar los calculos pasandole el modelo full:
+
+## 5) Calculo de Shapleys con Relaimp
+
+```{r}
+calc.relimp(modelo_full, type = c("lmg"), rela = TRUE, rank = TRUE)
+```
+```{r}
+summary(modelo_PesoActividad)
+```
+
+## 6) Conclusiones
+
+Finalmente, podemos decir que Shapley Value Regression es un método altamente utilizado en casos de multicolinearidad. La idea de los shapley values es ver los cambios en la variabilidad explicada (R2) cuando el predictor elegido se remueve del modelo. Por lo que para cada variable regresora, todos los posibles subconjuntos de predictores restantes se utilizan para evaluar la regresión, siendo la variable explicativa mas importante aquella con la mayor contribución adicional
+
+Para otros tipos de modelos (como modelos lineales generalizados) el cálculo de R2 no es apropiado. Debido a esto, se recomienda el uso de un método llamado "Pesos Relativos" que resulta mucho más rápido de computar. Tener en cuenta que Shapley Value Regression debe crear una cantidad 2^f modelos (donde f es la cantidad de features del modelo completo).
+
+Cabe aclarar que este método tambien se puede utilizar para el R2 ajustado.
